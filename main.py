@@ -1,20 +1,23 @@
+# Write your code here :-)
 # Ctrl-I for Co-Pilot
 import network
 import urequests
 import time
-from machine import Pin, PWM
-from utime import localtime
+from machine import Pin, PWM, deepsleep
+from bb_secret import Secrets
 
 class BabyBuddyFeaturesEnum:
-    WET_DIAPER = 'WET_DIAPER'
-    SOLID_DIAPER = 'SOLID_DIAPER'
-    BOTH_DIAPER = 'BOTH_DIAPER'
-    START_FEED = 'START_FEED'
-    END_FEED = 'END_FEED'
-    START_SLEEP = 'START_SLEEP'
-    END_SLEEP = 'END_SLEEP'
-    START_TUMMY = 'START_TUMMY'
-    END_TUMMY = 'END_TUMMY'
+    TUMMY_START = 'TUMMY_START'
+    TUMMY_END = 'TUMMY_END'
+    SLEEP_START = 'SLEEP_START'
+    SLEEP_END = 'SLEEP_END'
+    DIAPER_SOLID = 'DIAPER_DRY'
+    DIAPER_WET = 'DIAPER_WET'
+    FEED_START = 'FEED_START'
+    FEED_BOTTLE_MILK = 'FEED_BOTTLE_MILK'
+    FEED_BOTTLE_FORMULA = 'FEED_BOTTLE_FORMULA'
+    FEED_BREAST_LEFT = 'FEED_BREAST_LEFT'
+    FEED_BREAST_RIGHT = 'FEED_BREAST_RIGHT'
 
 
 
@@ -59,48 +62,85 @@ class BabyBuddyApiClient:
 
     def run(self):
         self.connect_wifi()
+        loop_start = time.ticks_ms()
 
         while True:
-            now = time.ticks_ms()
+            # Go to sleep if nothing has happened in 30 seconds
+            if time.ticks_ms() - loop_start > 30000:
+                print("Going to sleep")
+                time.sleep(1)
+                deepsleep()
 
-            for func, pin in self.buttons.items():
-                if not pin.value() and time.ticks_diff(now, self.button_last_press_time[func]) > self.debounce_ms:
-                    print(f"Button '{func}' pressed")
-                    self.buzzer.play_tone(1760, 250) # A6
+            # Look for button presses
+            pressed = self.get_pressed_buttons()
+            if len(pressed) == 0:
+                time.sleep(0.05)
+                continue
 
-                    try:
-                        if func == BabyBuddyFeaturesEnum.WET_DIAPER:
-                            self.log_diaper(wet=True, solid=False)
-                        elif func == BabyBuddyFeaturesEnum.SOLID_DIAPER:
-                            self.log_diaper(wet=False, solid=True)
-                        elif func == BabyBuddyFeaturesEnum.BOTH_DIAPER:
-                            self.log_diaper(wet=True, solid=True)
-                        elif func == BabyBuddyFeaturesEnum.START_FEED:
-                            self.start_timer("feeding")
-                        elif func == BabyBuddyFeaturesEnum.END_FEED:
-                            self.end_feeding("left breast", "breast milk")
-                        elif func == BabyBuddyFeaturesEnum.START_SLEEP:
-                            self.start_timer("sleep")
-                        elif func == BabyBuddyFeaturesEnum.END_SLEEP:
-                            self.end_sleep()
-                        elif func == BabyBuddyFeaturesEnum.START_TUMMY:
-                            self.start_timer("tummy_time")
-                        elif func == BabyBuddyFeaturesEnum.END_TUMMY:
-                            self.end_tummy_time()
-                    except Exception as ex:
-                        print(f"Error evaluating {func}:\n  {ex}")
-                        self.buzzer.chime_error()
-
-                    self.button_last_press_time[func] = now
-
+            # Small pause and get pressed buttons again in case multiple buttons pressed
             time.sleep(0.05)
+            pressed = pressed.union(self.get_pressed_buttons())
 
+            print(f"Pressed: '{pressed}'")
+            self.buzzer.play_tone(1760, 250) # A6
+
+            try:
+                # -- Diapers
+                if BabyBuddyFeaturesEnum.DIAPER_SOLID in pressed and BabyBuddyFeaturesEnum.DIAPER_WET in pressed:
+                    self.log_diaper(wet=True, solid=True)
+                elif BabyBuddyFeaturesEnum.DIAPER_WET in pressed:
+                    self.log_diaper(wet=True, solid=False)
+                elif BabyBuddyFeaturesEnum.DIAPER_SOLID in pressed:
+                    self.log_diaper(wet=False, solid=True)
+                # -- Feeding
+                elif BabyBuddyFeaturesEnum.FEED_START in pressed:
+                    self.start_timer("feeding")
+                elif BabyBuddyFeaturesEnum.FEED_BREAST_LEFT in pressed and BabyBuddyFeaturesEnum.FEED_BREAST_RIGHT in pressed:
+                    self.end_feeding("both breasts", "breast milk")
+                elif BabyBuddyFeaturesEnum.FEED_BREAST_LEFT in pressed:
+                    self.end_feeding("left breast", "breast milk")
+                elif BabyBuddyFeaturesEnum.FEED_BREAST_RIGHT in pressed:
+                    self.end_feeding("right breast", "breast milk")
+                elif BabyBuddyFeaturesEnum.FEED_BOTTLE_MILK in pressed:
+                    self.end_feeding("bottle", "breast milk")
+                elif BabyBuddyFeaturesEnum.FEED_BOTTLE_FORMULA in pressed:
+                    self.end_feeding("bottle", "formula")
+                # -- Sleep
+                elif BabyBuddyFeaturesEnum.SLEEP_START in pressed:
+                    self.start_timer("sleep")
+                elif BabyBuddyFeaturesEnum.SLEEP_END in pressed:
+                    self.end_sleep()
+                # -- Tummytime
+                elif BabyBuddyFeaturesEnum.TUMMY_START in pressed:
+                    self.start_timer("tummy_time")
+                elif BabyBuddyFeaturesEnum.TUMMY_END in pressed:
+                    self.end_tummy_time()
+                else:
+                    raise Exception(f"Unexpected buttons pressed: {pressed}")
+            except Exception as ex:
+                print(f"Error evaluating {pressed}:\n  {ex}")
+                self.buzzer.chime_error()
+
+
+            now = time.ticks_ms()
+            for func in pressed:
+                self.button_last_press_time[func] = now
+
+
+
+    def get_pressed_buttons(self):
+        now = time.ticks_ms()
+        pressed = set()
+        for func, pin in self.buttons.items():
+                if not pin.value() and time.ticks_diff(now, self.button_last_press_time[func]) > self.debounce_ms:
+                    pressed.add(func)
+        return pressed
     def end_feeding(self, method, type):
         # method: 'left breast' | 'right breast' | 'both breasts' | 'bottle'
         # type: 'breast milk' | 'formula'
 
         timer = self.find_or_create_timer("feeding")
-        
+
         # Log via a timer
         self.post("/feedings/", {
                 "timer": timer['id'],
@@ -108,10 +148,10 @@ class BabyBuddyApiClient:
                 'method': method,
             })
         self.buzzer.chime_ok()
-        
+
     def end_sleep(self):
         timer = self.find_or_create_timer("sleep")
-        
+
         # Log via a timer
         self.post("/sleep/", {
                 "timer": timer['id'],
@@ -120,7 +160,7 @@ class BabyBuddyApiClient:
 
     def end_tummy_time(self):
         timer = self.find_or_create_timer("tummy_time")
-        
+
         # Log via a timer
         self.post("/tummy-times/", {
                 "timer": timer['id'],
@@ -141,9 +181,9 @@ class BabyBuddyApiClient:
             return result
         else:
             raise Exception("Timer not created successfully")
-        
+
     def find_or_create_timer(self, timer_name):
-        """Find a timer by name, or create a new one.  
+        """Find a timer by name, or create a new one.
         Creates a new one because we don't have a real time clock so we don't know the time.
         """
         timers = self.get("/timers/")
@@ -151,8 +191,8 @@ class BabyBuddyApiClient:
         if len(feeding_timer) == 0:
             # Forgot to start feeding, create a timer real quick so we can provide it as an input
             return self.start_timer("feeding", False)
-        elif len(feeding_timer) == 1:            
-            return feeding_timer[0]            
+        elif len(feeding_timer) == 1:
+            return feeding_timer[0]
         else:
             raise Exception(f"Found {len(feeding_timer)} feeding timers")
 
@@ -209,9 +249,16 @@ class BabyBuddyApiClient:
 
 
 pin_assignments = {
-    #BabyBuddyFeaturesEnum.WET_DIAPER: 19, # <<<<
-    #BabyBuddyFeaturesEnum.START_FEED: 19,
-    #BabyBuddyFeaturesEnum.START_SLEEP: 19,
-    BabyBuddyFeaturesEnum.END_TUMMY: 19,
+    BabyBuddyFeaturesEnum.FEED_START: 33,
+    BabyBuddyFeaturesEnum.FEED_BREAST_LEFT: 23,
+    BabyBuddyFeaturesEnum.FEED_BREAST_RIGHT: 32,
+    BabyBuddyFeaturesEnum.FEED_BOTTLE_MILK: 22,
+    BabyBuddyFeaturesEnum.FEED_BOTTLE_FORMULA: 25,
+    BabyBuddyFeaturesEnum.DIAPER_SOLID: 19,
+    BabyBuddyFeaturesEnum.DIAPER_WET: 26,
+    BabyBuddyFeaturesEnum.SLEEP_START: 18,
+    BabyBuddyFeaturesEnum.SLEEP_END: 27,
+    BabyBuddyFeaturesEnum.TUMMY_START: 5,
+    BabyBuddyFeaturesEnum.TUMMY_END: 14,
 }
-BabyBuddyApiClient(pin_assignments=pin_assignments, buzzer_pin_num=23).run()
+BabyBuddyApiClient(pin_assignments=pin_assignments, buzzer_pin_num=13).run()
